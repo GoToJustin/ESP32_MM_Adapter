@@ -12,13 +12,13 @@ Coventry CV4 7AL
 M: +44 (0) 7986143550
 E: justin.molloy@warwick.ac.uk
 
-The code interfaces with Microimanager Adapter called mmgr_dal_ESP32.dll
+The code interfaces with MicroManager Adapter called mmgr_dal_ESP32.dll
 The C++ code for the MM adapter is also deposited on GitHUb.
 ESP32.Cpp & ESP32.h
 
 This arduino sketch is highly modified and specifically for ESP32 series microcontrollers.
 
-If you want to use Bluetooth, Wifi, Serial etc.. you might need to allocate more memory on your ESP Chip.
+If you want to use Bluetooth, Wifi, Serial etc.. you will need to allocate more memory on your ESP Chip.
 
 To compile this program for NodeMCU32s using Arduino IDE modify the memory allocation file:
 c:\Users\username\AppData\Local\Arduino15\packages\esp32\hardware\esp32\2.0.9\tools\partitions\default.csv
@@ -43,9 +43,8 @@ nodemcu-32s.upload.maximum_size=1638400
 nodemcu-32s.upload.maximum_data_size=327680
 nodemcu-32s.upload.wait_for_upload_port=true
 
-// Notes on the original Arduino  code:
-///////////////////////////////////////
-
+// Notes on the Bonno Meddens' original Arduino  code:
+//////////////////////////////////////////////////////
 The old MM-Device Adaptor code: "ARDUINO32bitBoards.cpp"
 Used the following commands:
 Command Number	=	Associated Method/Class
@@ -63,14 +62,14 @@ Command Number	=	Associated Method/Class
 	4	  =   CArduino32Input::OnAnalogInput(MM::PropertyBase* pProp, MM::ActionType eAct, long  channel )***check***
 	42	= 	CArduino32Input::SetPullUp(int pin, int state)
 
-These old codes were unused:
+These old codes seemed to be unused:
 2 - Query digitial outputs 
 7 - Skip triggers
 10 - Time intervals for trigger mode
 13-19 - Not defined
 23-29, 32-39, 41, 43->
 
-All the old commands are now replaces with readable ASCII command and value format:
+All the old commands are now replaced with ASCII command and value format:
 =================================================================
   Comma-delimited commands and parameters
   Example command format:	"P,7,123"
@@ -86,7 +85,7 @@ ESP32 Board pin-out....
                       ADC-3 GPIO34 o-           -o Int
                       ADC-2 GPIO35 o-           -o GPIO21     
                       ADC-1 GPIO32 o-           -o GND
-                      ADC-0 GPIO33 o-           -o GPIO19      *ch4 - to FET LED driver 1A max. SHUTTER
+                      ADC-0 GPIO33 o-           -o GPIO19      *Shutter - to FET driver 1A max. SHUTTER
     X OpAmp+LP filter *ch5  GPIO25 o-           -o GPIO18      *ch3 - to FET LED driver 1A max. Blue
     Y OpAmp+LP filter *ch6  GPIO26 o-           -o GPIO5       *ch2 - to FET LED driver 1A max. Green
     Z OpAmp+LP filter *ch7  GPIO27 o-           -o GPIO17      *ch1 - to FET LED driver 1A max. Yellow
@@ -102,7 +101,8 @@ ESP32 Board pin-out....
                                        USB skt 
 ==========================================================================================
 Note 8-bit res on GPIO25/26 is pretty poor so maybe set them to PWM mode at 14 bit res, (clk ~10kHz)
-Need to low-pass filter to about 100Hz to remove ripple - which would be fine for most X-Y stages
+Need to low-pass filter to about 10Hz to remove ripple - which would be fine for most X-Y stages
+Better still, use GPIO 25,26,27 as chip select lines for SPI comms to 16 or 20bit DACS.
 */
 
 // BLUETOOTH
@@ -145,9 +145,9 @@ int linemax = 8;
 String txtlines[] = { dummy, dummy, dummy, dummy, dummy, dummy, dummy, dummy };
 
 String MMresponse = "MM-ESP32";   // Expected response from Arduino
-unsigned int version = 5;       // modified MM adaptor requires >=5
+unsigned int version = 1;         // This is Version 1 <= update as necessary to allow checking by MM
 
-const int SEQUENCELENGTH = 12;  // This should be good enough
+const int SEQUENCELENGTH = 12;    // This should be good enough
 
 // Each byte in triggerPattern[] array codes the output blanking pattern for upto 5 - channels
 // Each entry is bitmapped as a binary mask to turn output pins off (="0") or at Vout value (="1").
@@ -287,15 +287,15 @@ Serial.begin(115200);  //Baud rate
   for (uint8_t i = 0; i < nDAC; i++) ledcSetup(i, PWMfreq[i]*1000, PWMres[i]);
   for (uint8_t i = 0; i < nDAC; i++) ledcAttachPin(DACpin[i], i);
 
-  String outStr = "Running:" + MMresponse + String(version);  
+  String outStr = "Running:" + MMresponse + "-v" + String(version);  
   writeln(outStr);
   
  // clear the RS232 serial buffer   
   Serial.flush();
 
 // Start Bluetooth
-  SerialBT.begin("ESP32s"); //Bluetooth device name
-  writeln("Bluetooth=ESP32s");
+  SerialBT.begin("Node_ESP32s"); //Bluetooth device name
+  writeln("Bluetooth=Node_ESP32s");
 
 // connect to WiFi
   outStr = "Connect:" + String(ssid);
@@ -349,13 +349,12 @@ void loop() {
         // We MUST send the outBuf if respond is true
         if (respond) {
           client.print(outBuf);
-          writeln(String(outBuf));
-        }           
+        }  
+        if (command != 'L') writeln(String(outBuf));                 
         command = 0;
       }
 
     if (Serial.available() > 0) doRS232();       // check for RS232 input
-
 
     if (SerialBT.available() > 0) doBlueTooth(); // check for bluetooth
 
@@ -389,8 +388,8 @@ void doRS232() {
     // We MUST send the outBuf if respond is true
     if (respond){
       Serial.print(outBuf);
-      writeln(String(outBuf));
-    }             
+    }     
+    if (command != 'L') writeln(String(outBuf));        
     command=0;
 }
 //==================
@@ -408,8 +407,8 @@ void doBlueTooth() {
     // We MUST send the outBuf if respond is true.
     if (respond){ 
       //Serial.print(outBuf);       
-      writeln(String(outBuf));
     }
+    if (command != 'L') writeln(String(outBuf));
     command=0;  
 }
 
@@ -423,7 +422,6 @@ void checkTrig() {
         bool trigSig = digitalRead(inPin);
         if ((triggerState != trigSig) && (blankOnHigh == trigSig)) { // first trigger - turn everything off
           writeZeros();
-          writeln("Arse");
           triggerState = trigSig; 
         } else if (blankOnHigh == trigSig) { // subsequent triggers
         if (triggerNr >= 0) {  // TRUE when we have skipped "n" pre-triggers
@@ -467,11 +465,6 @@ void splitStr(String str) {
     }
     nVals += 1;
   }
-
-    char pBuf[16];
-    if (command == 'L') ct+=1;
-    sprintf(pBuf, "%c:%.0f,%.0f,%d", command, val[0], val[1], ct);
-    writeln(String(pBuf));
 }
 
 //================
@@ -506,11 +499,12 @@ unsigned int tmp = 0;
       if (val[0] == 0){ 
         digitalWrite(shutterPin,LOW); // Close Shutter (assumes "normally closed")
         writeZeros();
-      } else if (val[0] == 1) {
+      } else if (val[0] > 0) {
+        currentPattern = (byte) val[0];
         writePattern(currentPattern);
         digitalWrite(shutterPin,HIGH); // OPEN Shutter (assumes "normally closed")
       }
-      sprintf(outBuf,"H\r\n");
+      sprintf(outBuf,"H,%d\r\n",(byte) val[0]);
       break;
 
 // "B,1/0" = Start Blanking mode based on InPin gating signal (was 20 & 21)
@@ -519,7 +513,7 @@ unsigned int tmp = 0;
     case 'B':
       if (val[0]==0) blanking = false;
       else blanking = true;
-      sprintf(outBuf,"B\r\n"); 
+      sprintf(outBuf,"B,%d\r\n",val[0]); 
       break;
 
 // "F,0/1" = Flip 'polarity' of input TTL for blanking mode
@@ -529,7 +523,7 @@ unsigned int tmp = 0;
     case 'F':
       if (val[0] == 1) blankOnHigh = false;
       else blankOnHigh = true;
-      sprintf(outBuf,"F\r\n"); 
+      sprintf(outBuf,"F,%d\r\n",val[0]); 
       break;
 
 // "S" = Set digital output pattern (was 1)
@@ -537,7 +531,7 @@ unsigned int tmp = 0;
     case 'S':  
       currentPattern = (byte) val[0];
       if (!blanking) writePattern(currentPattern);
-      sprintf(outBuf,"S\r\n");
+      sprintf(outBuf,"S,%d\r\n",val[0]);
       break;
 
 // "Q" = Query digital output pattern (was 2)
@@ -558,7 +552,7 @@ unsigned int tmp = 0;
         Vout[chan] = val[1]/100 * (1 << PWMres[chan]);
         ledcWrite(chan, Vout[chan]);
       }
-      sprintf(outBuf,"O\r\n");
+      sprintf(outBuf,"O,%d,%3.2f\r\n",val[0],val[1]);
       break;
 
 // "P" = bit Pattern used in triggered mode (was 5)
@@ -577,7 +571,7 @@ unsigned int tmp = 0;
           sprintf(pBuf, "O/P#:%d = %s", seqNo ,String(byte2bin));
           writeln(String(pBuf));
       }
-      sprintf(outBuf,"P\r\n");     
+      sprintf(outBuf,"P,%d,%d\r\n",val[0],val[1]);     
       break;
 
 // "N" = Number of digital patterns for trigger mode (was 6)
@@ -586,14 +580,14 @@ unsigned int tmp = 0;
     case 'N':
       seqNo = (int) val[0];    
       if ((seqNo >= 0) && (seqNo < SEQUENCELENGTH)) patternLength = seqNo;
-      sprintf(outBuf,"N\r\n");         
+      sprintf(outBuf,"N,%d\r\n",val[0]);         
       break;
 
 // "K" = sKip triggers (was 7)
 // "Kx" - x number of events to skip on input pin
     case 'K':
       skipTriggers = int(val[0]);
-      sprintf(outBuf,"K\r\n");     
+      sprintf(outBuf,"K,%d\r\n",val[0]);     
       break;
 
 // "R" = Run trigger mode (was 8)
@@ -627,14 +621,14 @@ unsigned int tmp = 0;
       if ((seqNo >= 0) && (seqNo < SEQUENCELENGTH)) {
         triggerDelay[seqNo] = (int) val[1];
       }
-      sprintf(outBuf,"T\r\n"); 
+      sprintf(outBuf,"T,%d\r\n",val[0]); 
       break;
 
 // "I" = Iterations of trigger patterns (was 11)
 // "Ix" - x number of iterations in timed trigger mode
     case 'I':
       repeatPattern = (int) val[0];
-      sprintf(outBuf,"I\r\n"); 
+      sprintf(outBuf,"I,%d\r\n",val[0]); 
       break;
 
 /////////////////////////////////////////////////////////////////////////////      
@@ -671,7 +665,7 @@ unsigned int tmp = 0;
     case 'L':
       chan = val[0];
       tmp=1;
-      if (chan < nADC) tmp = digitalRead(ADCpin[chan]); 
+      if ((chan>= 0) && (chan < nADC)) tmp = digitalRead(ADCpin[chan]); 
       sprintf(outBuf,"L,%d\r\n", tmp);
       resp=true;
       break;
@@ -698,7 +692,7 @@ unsigned int tmp = 0;
       if  (state) pinMode(ADCpin[chan], INPUT_PULLUP);
       else pinMode(ADCpin[chan], INPUT);
       } 
-      sprintf(outBuf,"D\r\n"); 
+      sprintf(outBuf,"D,%d,%d\r\n",val[0],val[1]); 
       break;
 
 //////////////////  XYZ Stage control Commands  //////////////////      
@@ -753,7 +747,7 @@ unsigned int tmp = 0;
       resp=true;
       break;
 
- // Stage and Focus Sequencing... this is not yet coded on the MMAdapter-side
+// Stage and Focus Sequencing... this is not yet coded on the MMAdapter-side
 // "M, chan, seqNo, posn"      
      case 'M':
       seqNo = (int) val[1];
@@ -780,7 +774,7 @@ unsigned int tmp = 0;
             break;            
         }
       }
-      sprintf(outBuf,"M\r\n");
+      sprintf(outBuf,"M,%d,%d,%3.2f\r\n",val[0],val[1],val[2]);
       break;
 
   }
