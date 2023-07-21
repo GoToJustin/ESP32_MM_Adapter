@@ -1,83 +1,78 @@
-///////////////////////////////////////////////////////////////////////////////
-// FILE:          Arduino32.cpp - Renamed and modified to ESP32.cpp
-// PROJECT:       Micro-Manager
-// SUBSYSTEM:     DeviceAdapters
-//-----------------------------------------------------------------------------
-// DESCRIPTION:   Adapter for Arduino 32bit boards
-//                Needs accompanying firmware to be installed on the board 
-//				  Available at https://github.com/bonnom/Arduino32BitBoards
-//                
-//                This device Adapter is a modded Arduino Device Adapter
-//
-// COPYRIGHT:     University of California, San Francisco, 2008
-//
-// LICENSE:       LGPL
-//
-// AUTHOR:        Original Author Arduino Device Adapter:
-//				  Nico Stuurman, nico@cmp.ucsf.edu, 11/09/2008
-//
-//                Automatic device detection by Karl Hoover
-//				  
-//                Author 32-Bit-Boards adaptation: 
-//                Bonno Meddens, 30/07/2019
-//
-//////////////////////////////////////////////////////////////////////////////////////
-// This version of the Device Adapter has been further modified from Arduino32BitBoards 
-// and the PiezoConcept XYZ Device adaptor.  Efforts have been made to comment the new 
-// code. However, the old code remains uncommented except for my guesses which may 
-// well be incorrect!
-// 
-// The associated Arduino code is called:
-// ESP32_COM_BT_WiFi.INO
-// Identified as "MM-ESP32" version 5
-// 
-// The ESP32 firmware code is heavily commented so should be pretty easy to modify. 
-// It has a combined interface to Bluetooth, WiFI & USB/RS232. It also supports an 
-// attached OLED screen which helps with debugging.
-// 
-// All commands are now sent as ASCII so we can debug them using PuTTY etc
-// The "byte count" overhead is trivial compared to USB bus latency times and total packet
-// size for single COM <-> transactions 
-//
-// Hint: to make the code easier to navigate in Visual Studio press "ctrl M" then "ctrl O"
-// to collapse the code.
-// 
-// To Do: All port communications should be conducted a single function (method) a bit like
-// the original CArduinoInput::ReadNbytes() function. But, it should be visible to all 
-// methods within all classes of this adapater. 
-// e.g. SendReceive(inbuf,inleng, outbuf, outleng). 
-// This seems utterly trivial but I don't know how to do it in C++!
-// 
-// There is a significant problem with this modified version of the adapter because the "Shutter" changes
-// the state of the "Switches" so the two devices are not independent - 
-// I don't like that and it will need to be changed for the WOSM adapter code
-// 
-// Due to my poor understanding of multi-threading and event-driven
-// action handlers...I find that the I/O buffer seems to get corrupted:
-// E.G. the regular "L" calls (input monitor thread) 
-// (which should occur every 0.5sec, but actually 0.6s?) often get 
-// jumbled into the I/O stream.
-// 
-// The analogue-read function only works intermittently for this reason..
-// "A" requests get jumbled with "L" requests - no idea why.
-//////////////////////////////////////////////////////////////////////////////////////
+/* 
+ =====================================================================
+ 
+ This Adapter is modified from Arduino32.cpp & PIEZOCONCEPT.cpp:
+
+ Original authors and copyright as below: 
+ COPYRIGHT:     University of California, San Francisco, 2008
+ LICENSE:       LGPL
+ AUTHOR:        Original Author Arduino Device Adapter:
+				  Nico Stuurman, nico@cmp.ucsf.edu, 11/09/2008
+ 
+                Automatic device detection by Karl Hoover
+ 
+                Author 32-Bit-Boards adaptation: 
+                Bonno Meddens, 30/07/2019
+ 
+ =====================================================================
+ 
+ This uManager Device Adapter is called "ESP32.cpp"
+ It requires associated firmware to be uploaded to an ESP family microcontroller.
+ The microcontroller is programmed using Arduino software.
+ "ESP32_COM_BT_WiFi.INO"
+
+ AUTHORS:      Justin E. Molloy & Nicholas J. Carter
+               University of Warwick, UK 2023
+
+ The firmware code is heavily commented so should be pretty easy to modify. 
+ It has a combined interface to Bluetooth, WiFI & USB/RS232. It also supports an 
+ attached OLED screen which helps with debugging.
+ 
+ Efforts have been made to comment any new code. However, much of the original code
+ remains uncommented except for some guesses which may be incorrect - I apologise.
+ 
+ Main changes:
+ 1) All commands are now sent as ASCII so we can debug/test using PuTTY and monitor command 
+    transactions on the OLED screen. The "byte count" overhead is trivial compared to USB bus 
+    latency times and total packet size for single COM <-> transactions - most transactions are
+    not time-critical
+ 2) Most commands are now simplex (no duplex handshaking)
+ 3) x,y,z stage control has been added
+ 
+ Hint: to make the code easier to navigate in Visual Studio press "ctrl M" then "ctrl O"
+ to collapse the code.
+ 
+ Things to improve:
+ 1) Need to fully comment the code so it is easy to modify and debug.
+ 2) Port communications are messy and should be conducted using a single function.
+ 3) String handling is inconsistent.
+    (Note: The "ASI-hub" has some very nice utility functions - need to port to here)
+ 5) In this version the "shutter" is a switch and the switch is a shutter which is confusing
+ 6) The input monitor thread (timed "L" calls) don't seem to work quite as I would expect
+ 7) Need to read back all settings especially: temperature, x,y,z stage posn, optical trap, 
+    magnetic tweezer position and various logic state switches so they can be saved with the
+    movie data as Tiff Tags
+ 8) MDA LED switching cycle is not working exactly as it should 
+    The first channel in the series turns on at end of cycle (during the dark phase)
+
+*/
 
 #include "ESP32.h"
 #include "ModuleInterface.h"
 #include <math.h>
 
-//$$ string and IO handling
+//string and IO handling
 #include <string>
 #include <sstream>
 #include <cstdio>
 #include "FixSnprintf.h"
 using namespace std;
-//$$
 
 #ifdef WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+#include "../../MMCore/CoreCallback.h"
 
 // Name the Devices something short and sensible
 const char* g_DeviceNameESP32Hub =     "ESP32-Hub";
@@ -92,15 +87,17 @@ const char* g_DeviceNameStage =        "ZStage";
 const char* g_DeviceNameXYStage =      "XYStage";
 const char* g_DeviceNameESP32Input =   "ESP32-Input";
 
-const char* g_PropertyMinUm =   "Z Stage Low Posn(um)";
-const char* g_PropertyMaxUm =   "Z Stage High Posn(um)";
-const char* g_PropertyXMinUm =  "X Stage Min Posn(um)";
-const char* g_PropertyXMaxUm =  "X Stage Max Posn(um)";
-const char* g_PropertyYMinUm =  "Y Stage Min Posn(um)";
-const char* g_PropertyYMaxUm =  "Y Stage Max Posn(um)";
+const char* g_PropertyMinUm =          "Z Stage Low Posn(um)";
+const char* g_PropertyMaxUm =          "Z Stage High Posn(um)";
+
+const char* g_PropertyXMinUm =         "X Stage Min Posn(um)";
+const char* g_PropertyXMaxUm =         "X Stage Max Posn(um)";
+
+const char* g_PropertyYMinUm =         "Y Stage Min Posn(um)";
+const char* g_PropertyYMaxUm =         "Y Stage Max Posn(um)";
 
 // Global info about the state of the ESP32.  This should be folded into a class
-const int g_Min_MMVersion = 5;
+const int g_Min_MMVersion = 1;
 const int g_Max_MMVersion = 100;
 const char* g_versionProp =         "Version";
 const char* g_normalLogicString =   "Normal";
@@ -117,12 +114,12 @@ MMThreadLock CESP32Hub::lock_;
 ///////////////////////////////////////////////////////////////////////////////
 MODULE_API void InitializeModuleData()
 {
-    // Justin's Notes: I think this is where the HUb and other devices are registered with the MMcore code
+    // The HUB and other devices are registered with the MMcore code
     // I think there are currently ~16 recognised Device "types" including:
-    // Hub, StateDevice, ShutterDevice, GenericDevice, SignalIODevice, StageDevice(focus?), XYStageDevice, AutofocusDevice, GalvoDevice
-    // There seems to be some ambiguity/overlap in what the different Device types actually do.. and the shutter function is used to change
-    // the LED output pattern - which is not logical to me.
-    // Anyway, seems we call 'em what we like!
+    // Hub, StateDevice, ShutterDevice, GenericDevice, SignalIODevice, StageDevice(focus?), 
+    // XYStageDevice, AutofocusDevice, GalvoDevice.. There seems to be some ambiguity/overlap
+    // in what the different Device types actually do.. and the shutter function is used to 
+    // change the LED output pattern.
 
     RegisterDevice(g_DeviceNameESP32Hub, MM::HubDevice,         "Hub (required)");
 
@@ -146,53 +143,19 @@ MODULE_API MM::Device* CreateDevice(const char* deviceName)
     // things get renamed again within the config file. Just keep your hair on and go
     // with it!
 
-    if ( deviceName == 0 )
-        return 0;
+    if ( deviceName == 0 ) return 0;
 
-    if ( strcmp(deviceName, g_DeviceNameESP32Hub) == 0 )
-    {
-        return new CESP32Hub;
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32Switch) == 0 )
-    {
-        return new CESP32Switch;
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32Shutter) == 0 )
-    {
-        return new CESP32Shutter;
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32PWM0) == 0 )
-    {
-        return new CESP32DA(0); // channel 0
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32PWM1) == 0 )
-    {
-        return new CESP32DA(1); // channel 1
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32PWM2) == 0 )
-    {
-        return new CESP32DA(2); // channel 2
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32PWM3) == 0 )
-    {
-        return new CESP32DA(3); // channel 3
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32PWM4) == 0 )
-    {
-        return new CESP32DA(4); // channel 4
-    }
-    else if ( strcmp(deviceName, g_DeviceNameStage) == 0 )
-    {
-        return new CESP32Stage();
-    }
-    else if ( strcmp(deviceName, g_DeviceNameXYStage) == 0 )
-    {
-        return new CESP32XYStage();
-    }
-    else if ( strcmp(deviceName, g_DeviceNameESP32Input) == 0 )
-    {
-        return new CESP32Input;
-    }
+    if ( strcmp(deviceName, g_DeviceNameESP32Hub) == 0 )          return new CESP32Hub;
+    else if ( strcmp(deviceName, g_DeviceNameESP32Switch) == 0 )  return new CESP32Switch;
+    else if ( strcmp(deviceName, g_DeviceNameESP32Shutter) == 0 ) return new CESP32Shutter;
+    else if ( strcmp(deviceName, g_DeviceNameESP32PWM0) == 0 )    return new CESP32DA(0); // channel 0
+    else if ( strcmp(deviceName, g_DeviceNameESP32PWM1) == 0 )    return new CESP32DA(1); // channel 1
+    else if ( strcmp(deviceName, g_DeviceNameESP32PWM2) == 0 )    return new CESP32DA(2); // channel 2
+    else if ( strcmp(deviceName, g_DeviceNameESP32PWM3) == 0 )    return new CESP32DA(3); // channel 3
+    else if ( strcmp(deviceName, g_DeviceNameESP32PWM4) == 0 )    return new CESP32DA(4); // channel 4
+    else if ( strcmp(deviceName, g_DeviceNameStage) == 0 )        return new CESP32Stage();
+    else if ( strcmp(deviceName, g_DeviceNameXYStage) == 0 )      return new CESP32XYStage();
+    else if ( strcmp(deviceName, g_DeviceNameESP32Input) == 0 )   return new CESP32Input;
     return 0;
 }
 
@@ -203,7 +166,7 @@ MODULE_API void DeleteDevice(MM::Device* pDevice)
 
 
 /* CESP32HUb implementation:
- Justin's Notes: The HUB is the master "Device" it gives a convenient way to communicate with several
+ The HUB is the master "Device" it gives a convenient way to communicate with several
  physical or "nominal" devices connected via a single cable to the PC. The hub heirarchy makes things 
  a little more complicated than adapters written for single, stand-alone, physical devices.
 
@@ -225,15 +188,14 @@ MODULE_API void DeleteDevice(MM::Device* pDevice)
  commands down its secondary RxTx (pins) with splitter (e.g. MAX 3221 + Max399 to 
  create a 3-port RS2323 hub)? Then we can control all our devices without writing individual
  device adapaters for MM.
- E.G.  One of our Toptica lasers requires only three commands via RS232 to do what we need:
+ E.G.  Our Toptica laser requires only three commands via RS232 to do what we need:
  "la on", "la off" and set power ("ch 1 pow "+(floating point mW value)) we can do that
- over the secondary (hardware) RxTx on ESP32.. (not done yet)
- We assign it to an available switch line (here channel "5")
+ over the secondary (hardware) RxTx on ESP32.
+ We assign it to an available DAC line (here channel "5")
  E.g. MM sends:     "O,5,0" to turn the laser OFF
                     "O,5,27.5" to turn laser on to 27.5mW
-
-ARDUINO PSEUDO-CODE
-///////////////////
+###
+ARDUINO PSEUDO-CODE:
 #include <HardwareSerial.h>
 void setup() {
     Serial.begin(115200);  // connected to computer
@@ -242,25 +204,23 @@ void setup() {
 
 void loop() {
     if (Serial.available()) {
-        ...read and process commands sent by micromanager via primary USB(RS232)
-        .. if it's output to channel 5 e.g.  "O,5,27.5" 
-        ...then echo the device-specific  command(s) via secondary RS232 [GPIO16] & [GPIO17]
+        ...read and process commands sent by uManager via primary USB(RS232)
+        .. if it's "O"utput to "channel 5" (the laser)  e.g.  "O,5,27.5" 
+        ...then echo the device-specific command via secondary RS232 [GPIO16] & [GPIO17]
         Serial2.println("ch 1 pow 27.5");
         Serial2.println("la on");
         Serial.println("O"); // echo back to micromanager that command has been received and done.
     }
 }
-///////////////////
+###
+Using the above approach the laser would just appear as another DAC channel: adjust power, turn on/off
+sequence it do what you like.
+*/
 
- Using the above approach you would not be adding a new "device" it would just appear as an 
- existing DAC channel. 
- 
- Suggest to use a COMport  "sniffer" to  list out ASCII commands sent by the manufacturer's software; 
- then write a crib sheet; test the commands using PuTTY, fold the minimal set of things you need into 
- your ESP32 controller software and echo down the secondary TxRx to the device.
- 
+/*
  HUB Summary:
- The Hub sends 2 "commands" / "requests" to the ESP device.
+ ============
+ The Hub code sends 2 commands or "requests" to the ESP device.
  => "V" "V"ersion number & Firmware ID? - expected response is "MM-ESP32,5" or greater 
  => "U,0-2" "U"nderstand the XYZ stage ranges (X=0, Y=1, Z=2) 
       => "U,0" expects ESP32 response e.g. "U,200" (X-axis range)
@@ -285,7 +245,7 @@ CESP32Hub::CESP32Hub() :
     timedOutputActive_ = false;
 
 
-    // we can guess what this does...
+// Create Error messages
     InitializeDefaultErrorMessages();
     SetErrorText(ERR_PORT_OPEN_FAILED, "Failed opening ESP32 USB device");
     SetErrorText(ERR_BOARD_NOT_FOUND, "Did not find an ESP32 board with the correct firmware.  Is the ESP32 board connected to this serial port?");
@@ -295,11 +255,13 @@ CESP32Hub::CESP32Hub() :
     errorText << g_Min_MMVersion << " to " << g_Max_MMVersion;
     SetErrorText(ERR_VERSION_MISMATCH, errorText.str().c_str());
 
-    // It would be very helpful to know exactly what this does...
+// Create some pre-initialisation properties:
+// Port:
     CPropertyAction* pAct = new CPropertyAction(this, &CESP32Hub::OnPort);
     CreateProperty(MM::g_Keyword_Port, "Undefined", MM::String, false, pAct, true);
 
-    // and this!
+// Set default logic property to "inverted" (1 is 0) ?
+// comments==0 
     pAct = new CPropertyAction(this, &CESP32Hub::OnLogic);
     CreateProperty("Logic", g_invertedLogicString, MM::String, false, pAct, true);
 
@@ -322,22 +284,23 @@ bool CESP32Hub::Busy()
     return false;
 }
 
-// Commands: 30 & 31 - We now just send "V" (to confirm "MM-ESP32" and version number)
+// Commands: 30 & 31 - We now just send "V" (to confirm ESP firmware name and version)
 int CESP32Hub::GetControllerVersion(int& version)
 {
-    // This seems a clean way to do things using char array to send and String for answer
+    // Here we use a char array to "send" and a string for "receive"
+    // Makes sense because we don't know how long the receive message will be
     int ret = DEVICE_OK;
     char command[50];
     string answer;
 
-    LogMessage("Checking ESP32 Software Version (>4?)", false);
+    LogMessage("Check ESP32 firmware name and version (>=1?)", false);
 
     // Flush the I/O buffer
     PurgeComPort(port_.c_str());
 
-    // construct the command string (actually a char array!)
-    snprintf(( char* ) command, 20, "V");   // better example: snprintf((char*) command,20,"P,%0.2f,%d",399.7523,12);
-    //                             would give = "P,399.75,12"
+    // construct the command char array (limit to 50 characters).. here it's just one character
+    snprintf(( char* ) command, 50, "V"); 
+    
     ret = SendSerialCommand(port_.c_str(), command, "\r\n");
     if ( ret != DEVICE_OK ) return ret;
 
@@ -350,13 +313,13 @@ int CESP32Hub::GetControllerVersion(int& version)
 
     if (answer.find("MM-ESP32") > 0 )  return ERR_BOARD_NOT_FOUND;
 
-    // convert answer string to a char array so we can parse it with sscanf.
+    // convert the "answer" string to a char array so we can parse it with sscanf
     const char* anschar = answer.c_str();
     sscanf(( const char* ) anschar, "%8s,%d", command, &version);
 
-    // version number should be > 4
+    // version number should be => 1
     std::ostringstream os;
-    os << "FirmwareQuery: " << answer << " MM-ESP32?: " << command << " Vers: " << version;
+    os << "Send/Receive:"<< port_.c_str() << " -> FirmwareQuery: " << answer;
     LogMessage(os.str().c_str(), false);
 
     LogMessage("InitialisingStageRanges X,Y,Z", false);
@@ -364,16 +327,12 @@ int CESP32Hub::GetControllerVersion(int& version)
     // now the XYZ stage setup
 
     double travelX, travelY, travelZ;
-    ret = GetAxisInfo(0, travelX);
-    if ( ret != DEVICE_OK ) return ret;
 
+    ret = GetAxisInfo(0, travelX);
     ret = GetAxisInfo(1, travelY);
-    if ( ret != DEVICE_OK ) return ret;
+    if ( ( travelX > 0 ) && ( travelY > 0 ) )  hasXYStage_ = true;
 
     ret = GetAxisInfo(2, travelZ);
-    if ( ret != DEVICE_OK ) return ret;
-
-    if ( ( travelX > 0 ) && ( travelY > 0 ) )  hasXYStage_ = true;
     if ( travelZ > 0 ) hasZStage_ = true;
 
     return ret;
@@ -410,6 +369,7 @@ int CESP32Hub::GetAxisInfo(int axis, double& travel)
     ret = GetSerialAnswer(port_.c_str(), "\r\n", answer);
     if ( ret != DEVICE_OK ) return ret;
 
+    // another way to play with string.. 
     std::stringstream ss(answer);
     std::string type, trav;
     getline(ss, type, ',');
@@ -430,8 +390,7 @@ bool CESP32Hub::SupportsDeviceDetection(void)
 
 MM::DeviceDetectionStatus CESP32Hub::DetectDevice(void)
 {
-    if ( initialized_ )
-        return MM::CanCommunicate;
+    if ( initialized_ )  return MM::CanCommunicate;
 
     // all conditions must be satisfied...
     MM::DeviceDetectionStatus result = MM::Misconfigured;
@@ -451,11 +410,10 @@ MM::DeviceDetectionStatus CESP32Hub::DetectDevice(void)
             GetCoreCallback()->GetDeviceProperty(port_.c_str(), "AnswerTimeout", answerTO);
 
             // device specific default communication parameters
-            // for ESP Duemilanova
             GetCoreCallback()->SetDeviceProperty(port_.c_str(), MM::g_Keyword_Handshaking, g_Off);
             GetCoreCallback()->SetDeviceProperty(port_.c_str(), MM::g_Keyword_BaudRate, "115200");
             GetCoreCallback()->SetDeviceProperty(port_.c_str(), MM::g_Keyword_StopBits, "1");
-            // ESP32 timed out in GetControllerVersion even if AnswerTimeout  = 300 ms
+            // ESP32 needs quite a long AnswerTimeout because it checks fo WiFi etc...
             GetCoreCallback()->SetDeviceProperty(port_.c_str(), "AnswerTimeout", "5000.0");
             GetCoreCallback()->SetDeviceProperty(port_.c_str(), "DelayBetweenCharsMs", "0");
             MM::Device* pS = GetCoreCallback()->GetDevice(this, port_.c_str());
@@ -469,7 +427,7 @@ MM::DeviceDetectionStatus CESP32Hub::DetectDevice(void)
             int v = 0;
             int ret = GetControllerVersion(v);
 
-            if ( DEVICE_OK != ret )  LogMessageCode(ret, true);
+            if ( DEVICE_OK != ret )  LogMessageCode(ret, false);
             else result = MM::CanCommunicate;
 
             pS->Shutdown();
@@ -494,7 +452,7 @@ int CESP32Hub::Initialize()
     if ( DEVICE_OK != ret )
         return ret;
 
-    // The first second or so after opening the serial port, the ESP32 is waiting for firmwareupgrades. sleep 2 second.
+    // Sleep for 2 seconds while ESP32 restarts. 
     CDeviceUtils::SleepMs(2000);
 
     MMThreadGuard myLock(lock_);
@@ -543,10 +501,7 @@ int CESP32Hub::DetectInstalledDevices()
         for ( size_t i = 0; i < peripherals.size(); i++ )
         {
             MM::Device* pDev = ::CreateDevice(peripherals[i].c_str());
-            if ( pDev )
-            {
-                AddInstalledDevice(pDev);
-            }
+            if ( pDev ) AddInstalledDevice(pDev);
         }
     }
 
@@ -605,12 +560,13 @@ int CESP32Hub::OnLogic(MM::PropertyBase* pProp, MM::ActionType pAct)
 /* CESP32Switch implementation:
  Justin's Notes:
  The "Switch Device" is registered with MM as a "State Device"
- I don't know the full command set used by the config file it seems to 
- be documented by "example".
+ I don't know the full command set used by the MM config file which is
+ documented by "example" - I haven't found a detailed listing for that.
 
  Different switch states are attached to different "channels" - 
  That is done here, again in the config file, also in the ESP32 firmware
- and finally the physical wiring of the GPIO pins.
+ and finally the physical wiring of the GPIO pins. Very flexible but 
+ the complexity can lead to confusion.
 */
 
 // CESP32Switch implementation
@@ -628,12 +584,12 @@ CESP32Switch::CESP32Switch() :
     InitializeDefaultErrorMessages();
 
     // add custom error messages
-    SetErrorText(ERR_UNKNOWN_POSITION, "Invalid position (state) specified");
+    SetErrorText(ERR_UNKNOWN_POSITION,  "Invalid position (state) specified");
     SetErrorText(ERR_INITIALIZE_FAILED, "Initialization of the device failed");
-    SetErrorText(ERR_WRITE_FAILED, "Failed to write data to the device");
-    SetErrorText(ERR_CLOSE_FAILED, "Failed closing the device");
-    SetErrorText(ERR_COMMUNICATION, "Error in communication with ESP32 board");
-    SetErrorText(ERR_NO_PORT_SET, "Hub Device not found.  The ESP32 Hub device is needed to create this device");
+    SetErrorText(ERR_WRITE_FAILED,      "Failed to write data to the device");
+    SetErrorText(ERR_CLOSE_FAILED,      "Failed closing the device");
+    SetErrorText(ERR_COMMUNICATION,     "Error in communication with ESP32 board");
+    SetErrorText(ERR_NO_PORT_SET,       "Hub Device not found.  The ESP32 Hub device is needed to create this device");
 
     for ( unsigned int i = 0; i < NUMPATTERNS; i++ )
         pattern_[i] = 0;
@@ -678,7 +634,7 @@ int CESP32Switch::Initialize()
     // so 2^4 = 16 bit-mapped options 
     // We will define up to 256 char labels for 256 options !
     // 0="0", 2="2"...... 255="255"
-    // The ASCII lables are just the decimal numbers representing each bit-mapped switch pattern
+    // The ASCII labels are the decimal numbers representing each bit-mapped switch pattern
     // (see below for explanation)
     
     //Create the text labels that we will use in the config file 
@@ -698,27 +654,27 @@ int CESP32Switch::Initialize()
       1,  1,  0,  1    = 8+4+1 = 13 Decimal
     To make this easier you list the options you want available in the Config file like this:
 
-*** config file:
+*** example config file: The comma-delimited fields need to be documented.. add HTTP: here..
 Label,ESP32-Switch,0,All_OFF
 Label,ESP32-Switch,1,Red
 Label,ESP32-Switch,2,Yellow
-Label,ESP32-Switch,4,Red
+Label,ESP32-Switch,4,Green
 Label,ESP32-Switch,8,Blue
 Label,ESP32-Switch,13,RedGreenBlue
+
 ConfigGroup,Channel,Red_LED,ESP32-Switch,Label,Red
 ConfigGroup,Channel,Yellow_LED,ESP32-Switch,Label,Yellow
 ConfigGroup,Channel,Green_LED,ESP32-Switch,Label,Green
 ConfigGroup,Channel,Blue_LED,ESP32-Switch,Label,Blue
-ConfigGroup,Channel,Red_Yell_UV,ESP32-Switch,Label,RedGreenBlue
+ConfigGroup,Channel,Red_Green_Blue_LEDs,ESP32-Switch,Label,RedGreenBlue
 *** 
 
     */
     // State
     CPropertyAction* pAct = new CPropertyAction(this, &CESP32Switch::OnState);
     int nRet = CreateProperty(MM::g_Keyword_State, "0", MM::Integer, false, pAct);
-    if ( nRet != DEVICE_OK )
-        return nRet;
-    SetPropertyLimits(MM::g_Keyword_State, 0, 256 - 1);
+    if ( nRet != DEVICE_OK ) return nRet;
+    SetPropertyLimits(MM::g_Keyword_State, 0, 255);
 
     // Label
     pAct = new CPropertyAction(this, &CStateBase::OnLabel);
@@ -752,9 +708,9 @@ ConfigGroup,Channel,Red_Yell_UV,ESP32-Switch,Label,RedGreenBlue
 
     /*
     // Some original comments:
-    // but SADLY, the code itself is commented out
+    // but SADLY, the code itself has been commented out
     // In fact, looks like a useful thing to include...To Do.
-    // ////////////////////////////////////////////////////////////////
+    // //////////////////////////////////////////////////////
     // Starts producing timed digital output patterns
     // Parameters that influence the pattern are 'Repeat Timed Pattern', 'Delay', 'State'
     // where the latter two are manipulated with the Get and SetPattern functions
@@ -798,6 +754,7 @@ int CESP32Switch::Shutdown()
     initialized_ = false;
     return DEVICE_OK;
 }
+
 // I am assuming when this function (method) is called the passed parameter "value"
 // is the bitmap pattern that is to be written to the switches (if bit is 0 the output is turned off
 // (electronically gated) if the bit is 1 then the output goes to it's preset value.
@@ -809,6 +766,7 @@ int CESP32Switch::WriteToPort(long value)
     if ( !hub || !hub->IsPortAvailable() )  return ERR_NO_PORT_SET;
 
     // keep the low byte only.. we might want up to 8 lines later
+    // Top bit (128) is the master shutter
     value = 255 & value; 
     if ( hub->IsLogicInverted() ) value = ~value;
 
@@ -896,8 +854,9 @@ int CESP32Switch::OnState(MM::PropertyBase* pProp, MM::ActionType eAct)
     }
     else if ( eAct == MM::AfterSet )
     {
- //  **** a comment here is essential !.. 
- // where are we getting the "pos" value from?
+
+ //  **** a comment here would be very helpful... 
+ // where are we GETting "pos" value from?
         long pos;
         pProp->Get(pos);
 
@@ -1041,7 +1000,7 @@ int CESP32Switch::OnStartTimedOutput(MM::PropertyBase* pProp, MM::ActionType eAc
 
     if ( eAct == MM::BeforeGet ) {
         if ( hub->IsTimedOutputActive() ) pProp->Set("Running");
-        else                            pProp->Set("Idle");
+        else                              pProp->Set("Idle");
     }
     else if ( eAct == MM::AfterSet )
     {
@@ -1115,7 +1074,7 @@ int CESP32Switch::OnBlanking(MM::PropertyBase* pProp, MM::ActionType eAct)
 
             blanking_ = true;
             hub->SetTimedOutput(false);
-            LogMessage("Switched blanking on", true);
+            LogMessage("Switched blanking on", false);
 
         }
         else if ( prop == g_Off && blanking_ ) {
@@ -1130,7 +1089,7 @@ int CESP32Switch::OnBlanking(MM::PropertyBase* pProp, MM::ActionType eAct)
 
             blanking_ = false;
             hub->SetTimedOutput(false);
-            LogMessage("Switched blanking off", true);
+            LogMessage("Switched blanking off", false);
         }
     }
     return DEVICE_OK;
@@ -1150,7 +1109,6 @@ int CESP32Switch::OnBlankingTriggerDirection(MM::PropertyBase* pProp, MM::Action
 
     // Perhaps shorten to one line and clarify logic?
     // Only execute if eAct has already been got and set.
-
     // if ((eAct != MM::BeforeGet) && (eAct == MM::AfterSet)) {
 
     if ( eAct == MM::BeforeGet ) {
@@ -1347,7 +1305,7 @@ int CESP32Shutter::Fire(double /*deltaT*/)
 // Note: channels 2,3,6 will switch on at their preset output level.. "shutter" is messing with the switches!
 // must try to separate church and state.
 
-// Command: 1 Now "H,1/0" Set shutter open or closed (this can be hardware or electronic shuttering) or both!          
+// Command: 1 Now "H,1/0" Set s"H"utter open or closed (this can be hardware or electronic shuttering) or both!          
 int CESP32Shutter::WriteToPort(long value)
 {
     CESP32Hub* hub = static_cast< CESP32Hub* >( GetParentHub() );
@@ -1356,8 +1314,8 @@ int CESP32Shutter::WriteToPort(long value)
 
     MMThreadGuard myLock(hub->GetLock());
 
-    // only keep the lowest bit only - just a single shutter it's either on or off (open or closed)
-    value = 1 & value;
+    // keep the lowest 8 bits -
+    value = value & 255;
     if ( hub->IsLogicInverted() )  value = ~value;
 
     hub->PurgeComPortH();
@@ -1367,7 +1325,7 @@ int CESP32Shutter::WriteToPort(long value)
     unsigned int leng;
 
     // load command buffer with the command string "lf" terminated.
-    leng = snprintf(( char* ) command, 50, "H,%d\n", value);
+    leng = snprintf(( char* ) command, 50, "H,%d\r\n", value);
     ret = hub->WriteToComPortH(( const unsigned char* ) command, leng);
     if ( ret != DEVICE_OK )  return ret;
 
@@ -1385,7 +1343,7 @@ int CESP32Shutter::WriteToPort(long value)
 // OnOnOff should be moved to "Switch::" : it's called during MDA and operates the "switch" indirectly
 // by issuing the "S" command
 
-// Action handlers - don't seem to work correctly at present. I've modded it so, it now fails!
+// Action handlers - don't seem to work correctly at present. I've modded it and it now fails!
 int CESP32Shutter::OnOnOff(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
     CESP32Hub* hub = static_cast< CESP32Hub* >( GetParentHub() );
@@ -1402,8 +1360,10 @@ int CESP32Shutter::OnOnOff(MM::PropertyBase* pProp, MM::ActionType eAct)
         if ( pos == 0 )
             ret = WriteToPort(0); // Shutter closed (and/or write zeros to all LEDs)
         else
-            ret = WriteToPort(1); //  Shutter open (and/or restore LED O/P pattern) <- I dont want "Shutter" to mess with switches
-        //  ret = WriteToPort(hub->GetSwitchState()); // restore old setting NO - let the ESP32 do this logic!
+            //ret = WriteToPort(1); // Shutter open (and/or restore LED O/P pattern) 
+                                    // Set top bit to open shutter
+           // ret = WriteToPort(pos | 128);
+            ret = WriteToPort((hub->GetSwitchState()) | 128); // restore old setting NO - let the ESP32 do this logic!
 
         if ( ret != DEVICE_OK )  return ret;
 
@@ -1465,26 +1425,11 @@ CESP32DA::CESP32DA(int channel) :
     CPropertyAction* pAct = new CPropertyAction(this, &CESP32DA::OnMaxVolt);
     CreateProperty("Power %", "100", MM::Float, false, pAct, true);
 
-    if (channel_ == 0)
-    {
-        name_ = g_DeviceNameESP32PWM0;
-    }
-    else if (channel_ == 1)
-    {
-        name_ = g_DeviceNameESP32PWM1;
-    }
-    else if (channel_ == 2)
-    {
-        name_ = g_DeviceNameESP32PWM2;
-    }
-    else if (channel_ == 3)
-    {
-        name_ = g_DeviceNameESP32PWM3;
-    }
-    else if (channel_ == 4)
-    {
-        name_ = g_DeviceNameESP32PWM4;
-    }
+    if (channel_ == 0)      name_ =  g_DeviceNameESP32PWM0;
+    else if (channel_ == 1) name_ =  g_DeviceNameESP32PWM1;
+    else if (channel_ == 2) name_ =  g_DeviceNameESP32PWM2;
+    else if (channel_ == 3) name_ =  g_DeviceNameESP32PWM3;
+    else if (channel_ == 4) name_ =  g_DeviceNameESP32PWM4;
 
     //name_ = channel_ == 1 ? g_DeviceNameESP32DA1 : g_DeviceNameESP32DA2;
 
@@ -1543,7 +1488,7 @@ int CESP32DA::Shutdown()
 }
 
 // Command: 3 now = "O,chan,value" Output DAC value
-int CESP32DA::WriteToPort(unsigned long value)
+int CESP32DA::WriteToPort(double value)
 {
     CESP32Hub* hub = static_cast<CESP32Hub*>(GetParentHub());
     if (!hub || !hub->IsPortAvailable())
@@ -1556,7 +1501,7 @@ int CESP32DA::WriteToPort(unsigned long value)
     char command[50];
     unsigned int leng;
 
-    leng = snprintf((char*)command, 50, "O,%d,%d\r\n", (int)channel_, value);
+    leng = snprintf((char*)command, 50, "O,%d,%3.3f\r\n", ( int ) channel_, value);
     ret = hub->WriteToComPortH((const unsigned char*)command, leng);
     if (ret != DEVICE_OK)  return ret;
 
@@ -1566,7 +1511,7 @@ int CESP32DA::WriteToPort(unsigned long value)
 }
 int CESP32DA::WriteSignal(double volts)
 {
-    long value = (long)volts;  // ( (volts - minV_) / maxV_ * 4095);
+    double value = volts;  // ( (volts - minV_) / maxV_ * 4095);
 
     std::ostringstream os;
     os << "Volts= " << volts << " MaxVoltage= " << maxV_ << " digitalValue= " << value;
@@ -1657,16 +1602,11 @@ CESP32Stage & CESP32XYStage
 Notes:
 Stage and Focus noise:
 On the ESP side, I gave the XYZ channels 16-bit resolution (which allows only 1kHz PWM (Fpwm) on ESP32).
-If we low-pass filter to 1 Hz (Fc) we will get "Ao * (Fc/Fpwm)"  of p-p PWM ripple noise i.e. 
-So, if the x-y stage has a range of 200um:
-The bit step-size (16-bit resolution) will be 3 nm (which is good for most purposes) 
-However, the PWM "ripple" at 1kHz will be ~200nm!.. which is unacceptable.
-If we set PWM to 14-bit resolution (and increase Fpwm) we get 12nm bit-steps and 50nm ripple noise (at 1Hz filtering).
-If we set PWM to 12-bit resolution (and increase Fpwm) we get 50nm bit-steps and 12nm ripple noise (at 1Hz filtering).
-Basically, this is probably not going to work well for high-resolution applications.. but fun to experiment!
+If we low-pass filter to 1 Hz (Fc) we will still get "Ao * (Fc/Fpwm)"  of p-p PWM ripple noise 
+which is too high for most applications.
 Suggest using 20-bit DACs (e.g. Analog devices: DAC1220) which can be 'chip selected' using 
 the "DAC" GPIO pins (see ESP32 Firmware code) and values sent using the ESP SPI interface. 
-It should be easy to "mod" the ESP32 firmware and leave this code unchanged.
+Easy to "mod" the ESP32 firmware and leave this code unchanged.
 */
 
 // CESP32Stage Implementation
@@ -1780,11 +1720,11 @@ int CESP32Stage::MoveZ(double pos)
     if ( pos < lowerLimit_ ) pos = lowerLimit_;
 
     char buf[25];
-    int length = sprintf(buf, "Z,%1.3f\r\n", pos);
+    int length = sprintf(buf, "Z,%3.3f\r\n", pos);
 
     std::stringstream ss;
     ss << "Command: " << buf << "  Position set: " << pos;
-    LogMessage(ss.str().c_str(), true);
+    LogMessage(ss.str().c_str(), false);
 
     MMThreadGuard myLock(hub->GetLock());
     hub->PurgeComPortH();
@@ -1812,7 +1752,7 @@ int CESP32Stage::MoveZ(double pos)
     hub->SetTimedOutput(false);
 
     std::ostringstream os;
-    os << "Z-Answer= " << answer;
+    os << "MoveZ Z," << pos;
     LogMessage(os.str().c_str(), false);
 
     pos_um_ = pos;
@@ -1924,7 +1864,7 @@ int CESP32XYStage::GetPositionSteps(long& x, long& y)
 
     std::stringstream ss;
     ss << "GetPositionSteps :=" << x << "," << y;
-    LogMessage(ss.str(), true);
+    LogMessage(ss.str(), false);
     return DEVICE_OK;
 }
 
@@ -1935,7 +1875,7 @@ int CESP32XYStage::SetPositionSteps(long x, long y)
 
     std::stringstream ss;
     ss << "Current position = " << posX_um_ << "," << posY_um_ << " \n Commanded position = " << posX << "," << posY;
-    LogMessage(ss.str(), true);
+    LogMessage(ss.str(), false);
 
     int ret = DEVICE_OK;
 
@@ -1970,11 +1910,11 @@ int CESP32XYStage::MoveX(double posUm)
     if ( posUm > upperLimitX_ ) posUm = upperLimitX_;
 
     char buf[25];
-    int length = sprintf(buf, "X,%1.3f\r\n", posUm);
+    int length = sprintf(buf, "X,%3.3f\r\n", posUm);
 
     std::stringstream ss;
     ss << "Command: " << buf << "  Position set: " << posUm;
-    LogMessage(ss.str().c_str(), true);
+    LogMessage(ss.str().c_str(), false);
 
     MMThreadGuard myLock(hub->GetLock());
     hub->PurgeComPortH();
@@ -2020,11 +1960,11 @@ int CESP32XYStage::MoveY(double posUm)
     if ( posUm > upperLimitY_ ) posUm = upperLimitY_;
 
     char buf[25];
-    int length = sprintf(buf, "Y,%1.3f\r\n", posUm);
+    int length = sprintf(buf, "Y,%3.3f\r\n", posUm);
 
     std::stringstream ss;
     ss << "Command: " << buf << "  Position set: " << posUm;
-    LogMessage(ss.str().c_str(), true);
+    LogMessage(ss.str().c_str(), false);
 
     MMThreadGuard myLock(hub->GetLock());
     hub->PurgeComPortH();
@@ -2146,10 +2086,8 @@ CESP32Input::CESP32Input() :
     pin_(0),
     name_(g_DeviceNameESP32Input)
 {
-    std::string errorText = "To use the Input function you need firmware version 5 or higher";
+    std::string errorText = "To use the Input function you need firmware version 1 or higher";
     SetErrorText(ERR_VERSION_MISMATCH, errorText.c_str());
-
-
 
     CreateProperty("Pin", "All", MM::String, false, 0, true);
     AddAllowedValue("Pin", "All");
@@ -2189,6 +2127,7 @@ int CESP32Input::Shutdown()
     return DEVICE_OK;
 }
 
+
 int CESP32Input::Initialize()
 {
     CESP32Hub* hub = static_cast< CESP32Hub* >( GetParentHub() );
@@ -2201,10 +2140,13 @@ int CESP32Input::Initialize()
     char ver[MM::MaxStrLength] = "0";
     hub->GetProperty(g_versionProp, ver);
 
-    // we should get ASCII "5" back from the ESP - convert to (int)
+    // we should get ASCII "1" (minimally) back from the ESP - convert to (int)
     int version = atoi(ver);
     if ( version < g_Min_MMVersion )  return ERR_VERSION_MISMATCH;
 
+
+    // This bit of code needs some comments!
+    // Are we going to use the GPIO lines for Analogue or Digital; I/O
     // I think the idea is to request setup of the INPUT_PULLUP state 
     // on the GPIO pins on the microcontroller... but it is not clear
 
@@ -2224,6 +2166,8 @@ int CESP32Input::Initialize()
 
     int start = 0;
     int end = 5;
+
+    //if pins_ != "All" then start=end=pin_ 
     if ( strcmp("All", pins_) != 0 ) {
         start = pin_;
         end = pin_;
@@ -2231,10 +2175,11 @@ int CESP32Input::Initialize()
 
     for ( long i = start; i <= end; i++ )
     {
+
+// This does something and it would be very helpful to know what*******
         CPropertyActionEx* pExAct = new CPropertyActionEx(this, &CESP32Input::OnAnalogInput, i);
         std::ostringstream os;
         os << "AnalogInput= " << i;
-
         ret = CreateProperty(os.str().c_str(), "0.0", MM::Float, true, pExAct);
         if ( ret != DEVICE_OK ) return ret;
 
@@ -2262,10 +2207,10 @@ bool CESP32Input::Busy()
     return false;
 }
 
-// Justin Notes: "GetDigitalInput" is polled every 0.5sec by the timed thread see below.
+// Justin Notes: "GetDigitalInput" is polled for state change every 0.5sec by the thread below.
 // In the original ESP code we were testing the Analogue Inputs for a digital change..
 // That's fine.. but we should set this up in a more obvious way.
-// suggest we assign a some of the GPIO lines as Digital I/O and some as Analogue Input.
+// suggest we assign some of the GPIO lines as Digital I/O and some as Analogue Input.
 // Currently this is unclear to me...I don't know what Analogue inputs we want to monitor.
 
 // Command: 40 now "L" logic in - returns "L,l\r\n" pin High/Low
@@ -2312,11 +2257,16 @@ int CESP32Input::GetDigitalInput(long* state)
     int num;
     char com[1];
     sscanf(( const char* ) answer, "%1s,%d", com, &num);
+
     // should give com[0]='L' and num = 1 or 0 
 
     if ( com[0] != 'L' )  return ERR_COMMUNICATION;
 
     *state = ( long ) num;
+
+    std::ostringstream os;
+    os << "GetDigitalInput_State=" << *state << " testPin = " << testPin;
+    LogMessage(os.str().c_str(), false);
 
     return DEVICE_OK;
 }
@@ -2392,7 +2342,7 @@ int CESP32Input::OnAnalogInput(MM::PropertyBase* pProp, MM::ActionType eAct, lon
         // should give com[0]='A' and num = 597 or something!
 
         std::ostringstream os;
-        os << "AnswerToA= " << answer << " bytesRead= " << bytesRead << " com= " << com << " num= " << num;
+        os << "AnswerTo A," << channel << " = " << answer;
         LogMessage(os.str().c_str(), false);
 
         if ( com[0] != 'A' )  return ERR_COMMUNICATION;
@@ -2435,8 +2385,8 @@ ESP32InputMonitorThread::~ESP32InputMonitorThread()
     wait();
 }
 
-// I think this "free-running" thread is a 0.5s delay loop that polls the Digital I/O lines and reports changes
-// It is perhaps not "thread safe" because the "L" and "A" commands seems to interfere... I haven't debugged this.
+// I think this thread is a 0.5s delay loop that polls the Digital I/O lines and reports changes
+// It looks like an infinite background polling-thread...until we hit a comms error
 // It has probably been messed-up by my meddling!
 
 int ESP32InputMonitorThread::svc()
@@ -2447,7 +2397,7 @@ int ESP32InputMonitorThread::svc()
         int ret = aInput_.GetDigitalInput(&state);
         if ( ret != DEVICE_OK )
         {
-            stop_ = true;
+            stop_ = true; // on communication error drop out of loop and don't retry ??
             return ret;
         }
 
