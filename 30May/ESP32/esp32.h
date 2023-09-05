@@ -212,7 +212,7 @@ public:
     int OnChannel(MM::PropertyBase* pProp, MM::ActionType eAct);
 
 private:
-    int WriteToPort(double lnValue);
+    int WriteToPort(unsigned long lnValue);
     int WriteSignal(double volts);
 
     bool initialized_;
